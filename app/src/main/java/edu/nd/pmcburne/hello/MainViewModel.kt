@@ -1,41 +1,82 @@
 package edu.nd.pmcburne.hello
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import edu.nd.pmcburne.hello.data.AppDatabase
+import edu.nd.pmcburne.hello.data.MapPlacemark
+import edu.nd.pmcburne.hello.data.PlacemarkRepository
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
-data class MainUIState(
-    val counterValue: Int
+data class MainUiState(
+    val isLoading: Boolean = true,
+    val selectedTag: String = "core",
+    val availableTags: List<String> = emptyList(),
+    val visiblePlacemarks: List<MapPlacemark> = emptyList(),
+    val errorMessage: String? = null
 )
 
-class MainViewModel(
-    val initialCounterValue: Int = 0
-) : ViewModel() {
-    private val _uiState = MutableStateFlow(MainUIState(initialCounterValue))
-    val uiState: StateFlow<MainUIState> = _uiState.asStateFlow()
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+    private val repository = PlacemarkRepository(
+        AppDatabase.getDatabase(application).placemarkDao()
+    )
 
-    fun incrementCounter() {
-        _uiState.update{ currentState ->
-            currentState.copy(counterValue = _uiState.value.counterValue + 1)
+    private val selectedTag = MutableStateFlow("core")
+    private val loading = MutableStateFlow(true)
+    private val errorMessage = MutableStateFlow<String?>(null)
+
+    val uiState: StateFlow<MainUiState> = combine(
+        repository.tags,
+        repository.placemarks,
+        selectedTag,
+        loading,
+        errorMessage
+    ) { tags, placemarks, currentTag, isLoading, currentError ->
+        val sortedTags = tags.distinct().sorted()
+        val chosenTag = when {
+            sortedTags.isEmpty() -> currentTag
+            sortedTags.contains(currentTag) -> currentTag
+            sortedTags.contains("core") -> "core"
+            else -> sortedTags.first()
         }
+
+        MainUiState(
+            isLoading = isLoading,
+            selectedTag = chosenTag,
+            availableTags = sortedTags,
+            visiblePlacemarks = placemarks.filter { chosenTag in it.tags },
+            errorMessage = currentError
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = MainUiState()
+    )
+
+    init {
+        refreshData()
     }
 
-    fun decrementCounter() {
-        _uiState.update{ currentState ->
-            currentState.copy(counterValue = _uiState.value.counterValue - 1)
-        }
+    fun onTagSelected(tag: String) {
+        selectedTag.value = tag
     }
 
-    fun resetCounter() {
-        _uiState.update { currentState ->
-            currentState.copy(counterValue = 0)
+    fun refreshData() {
+        viewModelScope.launch {
+            loading.value = true
+            errorMessage.value = null
+            try {
+                repository.syncPlacemarks()
+            } catch (e: Exception) {
+                errorMessage.value = e.message ?: "Unable to load map data."
+            } finally {
+                loading.value = false
+            }
         }
     }
-
-    val isDecrementEnabled: Boolean
-        get() = _uiState.value.counterValue > 0
-    val isResetEnabled: Boolean
-        get() = _uiState.value.counterValue > 0
 }
